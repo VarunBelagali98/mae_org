@@ -1,0 +1,18 @@
+backbone_pretrain: ../tmp/mae_1_ep500/ckpts/checkpoint_0499.pth.tar
+
+#policy
+policy_network_dim: 8
+policy_arch: Policy
+
+# mae model
+patchembed: 'PatchEmbed'
+mask_ratio: 0.75
+input_size: 224
+patch_size: 16
+in_chans: 3
+encoder_embed_dim: 192
+encoder_depth: 6
+encoder_num_heads: 3
+
+#policy network
+policy_network_parameters: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]

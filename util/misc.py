@@ -242,10 +242,36 @@ def init_distributed_mode(args):
     args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
+    print(args.dist_url, args.world_size, args.dist_backend)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                          world_size=args.world_size, rank=args.rank)
+    print("entering barrier")
     torch.distributed.barrier()
+    print("out of barrier")
     setup_for_distributed(args.rank == 0)
+
+
+def init_distributed_mode_v2(args):
+    args.distributed = True
+    args.gpu = args.rank
+    torch.multiprocessing.set_start_method('fork', force=True)
+    # suppress printing if not master
+
+    torch.cuda.set_device(args.gpu)
+    args.dist_backend = 'nccl'
+    print('| distributed init (rank {}): {}, gpu {}'.format(
+        args.rank, args.dist_url, args.gpu), flush=True)
+    print(args.dist_url, args.world_size, args.dist_backend)
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                         world_size=args.world_size, rank=args.rank)
+    print("entering barrier")
+    torch.distributed.barrier()
+    print("out of barrier")
+    if (args.gpu != 0 or args.rank != 0):
+        def print_pass(*args):
+            pass
+        builtins.print = print_pass
+    #setup_for_distributed(args.rank == 0)
 
 
 class NativeScalerWithGradNormCount:

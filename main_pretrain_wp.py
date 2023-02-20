@@ -24,7 +24,7 @@ import torchvision.datasets as datasets
 import torch.multiprocessing as mp
 import timm
 
-#assert timm.__version__ == "0.3.2"  # version check
+assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
@@ -32,9 +32,9 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_mae
 
-from engine_pretrain import train_one_epoch
+from engine_pretrain_wp import train_one_epoch
 
-from policy_models import MAE_Policy, get_policy_conf
+from policy_models import MAE_Policy, get_policy_conf, load_policy_model
 
 
 def get_args_parser():
@@ -103,6 +103,12 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # policy
+    parser.add_argument('--mode', default='policy', type=str,
+                        help='mode = random or policy')
+    parser.add_argument('--policy_config', default="", type=str, 
+                        help = "path to config file of policy network")
+
     return parser
 
 
@@ -156,13 +162,20 @@ def main(rank, args):
     )
     
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
-
-    policy_args = get_policy_conf() #hard code file name for now
-    policy_model = MAE_Policy(policy_args)
+    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, mode=args.mode)
 
     model.to(device)
-    policy_model.to(device)
+
+    if args.mode == "policy":
+        policy_args = get_policy_conf(args.policy_config) #hard code file name for now
+        policy_model = MAE_Policy(policy_args)
+        policy_model = load_policy_model(policy_model, policy_args=policy_args)
+        print("using optimal mae")
+        policy_model.to(device)
+        policy_model.eval()
+    else:
+        policy_model = None
+        print("using random mae")
 
     model_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
@@ -199,6 +212,7 @@ def main(rank, args):
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
+            policy_model=policy_model,
             args=args
         )
         if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
