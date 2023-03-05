@@ -1,4 +1,4 @@
-backbone_pretrain: ../tmp/mae_1_ep500/ckpts/checkpoint_0499.pth.tar
+backbone_pretrain: ../tmp/mae_1_ep500/checkpoint_0499.pth.tar
 
 #policy
 policy_network_dim: 8
@@ -15,4 +15,4 @@ encoder_depth: 6
 encoder_num_heads: 3
 
 #policy network
-policy_network_parameters: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+policy_network_parameters: [0.33403905433680703, -0.3171850130489968, 0.18695533386046326, 0.3717107356661693, -0.8309052336250607, 0.4151372256787076, 0.39462648903139796, -0.3319157597274027]

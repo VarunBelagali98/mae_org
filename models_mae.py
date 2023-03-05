@@ -135,12 +135,15 @@ class MaskedAutoencoderViT(nn.Module):
         assert (mode=="random") or (mode=="policy")
 
         if mode == "policy":
-            noise = mask_scores.argsort(dim=1, descending=True)
+            ids_shuffle = mask_scores.argsort(dim=1, descending=True)
+            #print("poicy masking")
         elif mode == "random":
             noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+            ids_shuffle = torch.argsort(noise, dim=1)
+            #print("random masking")
 
         # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        #ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
         ids_restore = torch.argsort(ids_shuffle, dim=1)
 
         # keep the first subset

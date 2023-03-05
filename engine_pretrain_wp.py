@@ -45,9 +45,13 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
 
+
         with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                mask_scores = policy_model(samples)
+            if args.mode == "policy":
+                with torch.no_grad():
+                    mask_scores = policy_model(samples)
+            else:
+                mask_scores = None
             loss, _, _ = model(samples, mask_ratio=args.mask_ratio, mask_scores=mask_scores)
 
         loss_value = loss.item()
