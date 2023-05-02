@@ -16,14 +16,12 @@ import torch
 
 import util.misc as misc
 import util.lr_sched as lr_sched
-import wandb
-import torchvision
+
 
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
-                    policy_model = None,
                     args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -44,35 +42,10 @@ def train_one_epoch(model: torch.nn.Module,
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        alpha = 0.5 * (0.5 * (1. + math.cos(math.pi * (epoch + data_iter_step / len(data_loader)) / (args.epochs))))
-        if data_iter_step == 0:
-            print("alpha", alpha)
-
         samples = samples.to(device, non_blocking=True)
 
-
         with torch.cuda.amp.autocast():
-            if args.mode == "policy":
-                with torch.no_grad():
-                    mask_scores = policy_model(samples)
-            else:
-                mask_scores = None
-            loss, pred, masked_x, target = model(samples, mask_ratio=args.mask_ratio, mask_scores=mask_scores, alpha=alpha)
-
-            if epoch % 10 == 0 and data_iter_step== 0:
-                vis_tensor = torch.cat([target, masked_x, pred], dim=0)
-                vis_grid = patches2image(vis_tensor)
-                iters = epoch * len()
-
-                print("wandb logging")
-                vis_grid = wandb.Image(vis_grid, caption=f"iter{epoch:06d}")
-
-                wandb.log(
-                    {
-                    f'vis': vis_grid,
-                    },
-                    step=epoch
-                )
+            loss, _, _, p_x = model(samples, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
 
@@ -81,6 +54,8 @@ def train_one_epoch(model: torch.nn.Module,
             sys.exit(1)
 
         loss /= accum_iter
+
+
         loss_scaler(loss, optimizer, parameters=model.parameters(),
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
         if (data_iter_step + 1) % accum_iter == 0:
@@ -107,30 +82,3 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-def patches2image(patches, color_chans=3, n_group=3):
-    """
-    input patches is in shape of [B, L, C*H*W]
-    """
-    B = patches[0]
-    image = unpatchify(patches)
-    assert B % n_group == 0
-    n_per_row = B // n_group
-    grid_of_images = torchvision.utils.make_grid(image, nrow=n_per_row)
-    grid_of_images.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
-
-    return grid_of_images
-
-def unpatchify(self, x):
-	"""
-	x: (N, L, patch_size**2 *3)
-	imgs: (N, 3, H, W)
-	"""
-	p = self.patch_embed.patch_size[0]
-	h = w = int(x.shape[1]**.5)
-	assert h * w == x.shape[1]
-		
-	x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
-	x = torch.einsum('nhwpqc->nchpwq', x)
-	imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
-	return imgs

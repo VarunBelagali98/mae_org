@@ -16,14 +16,13 @@ import torch
 
 import util.misc as misc
 import util.lr_sched as lr_sched
-import wandb
-import torchvision
+import torch.nn.functional as F
+import wandb 
 
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
-                    policy_model = None,
                     args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -44,41 +43,28 @@ def train_one_epoch(model: torch.nn.Module,
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        alpha = 0.5 * (0.5 * (1. + math.cos(math.pi * (epoch + data_iter_step / len(data_loader)) / (args.epochs))))
-        if data_iter_step == 0:
-            print("alpha", alpha)
-
         samples = samples.to(device, non_blocking=True)
 
-
         with torch.cuda.amp.autocast():
-            if args.mode == "policy":
-                with torch.no_grad():
-                    mask_scores = policy_model(samples)
-            else:
-                mask_scores = None
-            loss, pred, masked_x, target = model(samples, mask_ratio=args.mask_ratio, mask_scores=mask_scores, alpha=alpha)
+            loss, _, _, _ = model(samples, mask_ratio=args.mask_ratio)
+        
 
-            if epoch % 10 == 0 and data_iter_step== 0:
-                vis_tensor = torch.cat([target, masked_x, pred], dim=0)
-                vis_grid = patches2image(vis_tensor)
-                iters = epoch * len()
-
-                print("wandb logging")
-                vis_grid = wandb.Image(vis_grid, caption=f"iter{epoch:06d}")
-
-                wandb.log(
-                    {
-                    f'vis': vis_grid,
-                    },
-                    step=epoch
-                )
+        '''
+        with torch.no_grad():
+            _, _, _, latent = model(samples, mask_ratio=0)
+            if latent != None:
+                latent = latent.detach()
+                std_cls, cov_cls = misc.vic_reg(latent[:, 0])
+                koleo_cls = misc.KoLeoLoss().forward(torch.mean(latent, dim=1))
+                std_gap, cov_gap = misc.vic_reg(latent[:, 0])
+                koleo_gap = misc.KoLeoLoss().forward(torch.mean(latent, dim=1))'''
 
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
+
 
         loss /= accum_iter
         loss_scaler(loss, optimizer, parameters=model.parameters(),
@@ -102,35 +88,73 @@ def train_one_epoch(model: torch.nn.Module,
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
 
+        if  args.log_to_wandb:
+            niters = epoch * len(data_loader) + data_iter_step
+            wandb.log(
+                        {
+                        "lr": lr,
+                        "Loss": loss.item(),
+                        #"std_cls": std_cls,
+                        #"cov_cls": cov_cls,
+                        #"koleo_cls": koleo_cls,
+                        #"std_gap": std_gap,
+                        #"cov_gap": cov_gap,
+                        #"koleo_gap": koleo_gap,
+                        },
+                        step=niters,
+                    )
+
+
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-def patches2image(patches, color_chans=3, n_group=3):
-    """
-    input patches is in shape of [B, L, C*H*W]
-    """
-    B = patches[0]
-    image = unpatchify(patches)
-    assert B % n_group == 0
-    n_per_row = B // n_group
-    grid_of_images = torchvision.utils.make_grid(image, nrow=n_per_row)
-    grid_of_images.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
 
-    return grid_of_images
+def val_one_epoch(model: torch.nn.Module,
+                    val_data_loader: Iterable,
+                    device: torch.device, epoch: int, niters: int,
+                    log_writer=None,
+                    args=None):
+    
+    if (epoch+1) % 10 != 0 and epoch + 1 != args.epochs:
+        return None
 
-def unpatchify(self, x):
-	"""
-	x: (N, L, patch_size**2 *3)
-	imgs: (N, 3, H, W)
-	"""
-	p = self.patch_embed.patch_size[0]
-	h = w = int(x.shape[1]**.5)
-	assert h * w == x.shape[1]
-		
-	x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
-	x = torch.einsum('nhwpqc->nchpwq', x)
-	imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
-	return imgs
+    features = []
+    indexes = []
+    model.eval()
+
+    for i, data_item in enumerate(val_data_loader):
+        samples, index = data_item
+        samples = samples.cuda(device, non_blocking=True)
+        with torch.no_grad():
+            _, _, _, latent = model(samples, mask_ratio=0)
+        f = latent[:, 0]
+        f = f.cpu().detach()
+        features.append(f)
+        indexes.append(index)
+    features = torch.cat(features, dim=0)
+    indexes = torch.cat(indexes, dim=0)
+    #print(features.shape, indexes.shape)
+
+    inv_dist_entropy_norm = misc.evaluate_kmeans_entropy(features, 100, -1, True)
+    dist_entropy_norm = misc.evaluate_kmeans_entropy(features, 100, 1, True)
+    inv_dist_entropy = misc.evaluate_kmeans_entropy(features, 100, -1, False)
+    dist_entropy = misc.evaluate_kmeans_entropy(features, 100, 1, False)
+
+
+    if  args.log_to_wandb:
+        #niters = epoch * len(val_data_loader)
+        wandb.log(
+            {
+            "inv_dist_entropy": inv_dist_entropy,
+            "dist_entropy": dist_entropy,
+            "inv_dist_entropy_norm": inv_dist_entropy_norm,
+            "dist_entropy_norm": dist_entropy_norm
+            },
+            step=niters,
+            )
+
+    return inv_dist_entropy, dist_entropy
+

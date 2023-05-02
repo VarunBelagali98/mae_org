@@ -19,7 +19,7 @@ from timm.models.vision_transformer import PatchEmbed, Block
 from util.pos_embed import get_2d_sincos_pos_embed
 
 
-class MaskedAutoencoderViT(nn.Module):
+class AdaMaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
@@ -56,6 +56,16 @@ class MaskedAutoencoderViT(nn.Module):
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
+
+        # --------------------------------------------------------------------------
+        self.get_token_probs = nn.Sequential(
+                                Block(dim=embed_dim, num_heads=3, mlp_ratio=4., qkv_bias=False, qk_scale=None,
+                                drop=0.1, attn_drop=0.00, drop_path=0.00, norm_layer=nn.LayerNorm,),
+                                nn.Linear(embed_dim, 1),
+                                torch.nn.Flatten(start_dim=1),
+                                )
+        
+        self.softmax =  nn.Softmax(dim=-1)
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
@@ -120,6 +130,20 @@ class MaskedAutoencoderViT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
 
+    def get_mask(self, x, mask_ratio):
+        x = x.clone().detach()
+        num_visible_patches = int(x.shape[1] * (1- mask_ratio))
+        logits = self.get_token_probs(x)
+        logits =  torch.nan_to_num(logits)
+        p_x = self.softmax(logits)
+        #print(p_x.shape)
+        vis_idx = torch.multinomial(p_x, num_samples=num_visible_patches, replacement=False)
+        mask = torch.ones((x.shape[0], x.shape[1])).to(x.device, non_blocking=True)
+        mask.scatter_(dim=-1, index=vis_idx.long(), value=0)
+        #mask = mask.flatten(1).to(torch.bool)
+        mask = mask.detach()
+        return p_x, mask
+
     def random_masking(self, x, mask_ratio):
         """
         Perform per-sample random masking by per-sample shuffling.
@@ -129,10 +153,11 @@ class MaskedAutoencoderViT(nn.Module):
         N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
         
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        #noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        p_x, mask = self.get_mask(x, mask_ratio)
         
         # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_shuffle = torch.argsort(mask, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
 
         # keep the first subset
@@ -140,12 +165,12 @@ class MaskedAutoencoderViT(nn.Module):
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
+        #mask = torch.ones([N, L], device=x.device)
+        #mask[:, :len_keep] = 0
         # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
+        #mask = torch.gather(mask, dim=1, index=ids_restore)
 
-        return x_masked, mask, ids_restore
+        return x_masked, mask, ids_restore, p_x
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
@@ -155,7 +180,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        x, mask, ids_restore, p_x = self.random_masking(x, mask_ratio)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -167,7 +192,7 @@ class MaskedAutoencoderViT(nn.Module):
             x = blk(x)
         x = self.norm(x)
 
-        return x, mask, ids_restore
+        return x, mask, ids_restore, p_x
 
     def forward_decoder(self, x, ids_restore):
         # embed tokens
@@ -195,7 +220,22 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_loss(self, imgs, pred, mask):
+    def forward_ada_loss(self, p_x, mask, mse_loss):
+        l_s =torch.zeros(p_x.shape[0], ).to(p_x.device)
+        bool_masked_pos = mask.to(torch.bool)
+        for i in range(p_x.shape[0]):
+            # categorical distribution
+            m = torch.distributions.categorical.Categorical(probs=p_x[i])    
+            # log-probabilities
+            log_probs = m.log_prob(torch.arange(0, p_x.shape[1], 1).to(p_x.device)) # 1, N_m    
+            # mask log-probs
+            mask_log_probs = log_probs[bool_masked_pos[i]]
+            # we need to select tokens that maximize the reconstruction error, so (-) sign
+            l_s[i] = -torch.mean(mask_log_probs*mse_loss[i].detach())
+        #print(l_s.shape)
+        return 1e-4*torch.mean(l_s) #Sampling loss
+
+    def forward_loss(self, imgs, pred, mask, p_x):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -209,50 +249,25 @@ class MaskedAutoencoderViT(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss_b = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # mean loss on removed patches
+        loss = torch.mean(loss_b)
+        ada_loss = self.forward_ada_loss(p_x, mask, loss_b)
+        loss = loss + ada_loss
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        latent, mask, ids_restore, p_x = self.forward_encoder(imgs, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask)
+        loss = self.forward_loss(imgs, pred, mask, p_x)
         return loss, pred, mask, latent
 
 
-def mae_vit_base_patch16_dec512d8b(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
-        decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
 
-
-def mae_vit_large_patch16_dec512d8b(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=16, embed_dim=1024, depth=24, num_heads=16,
-        decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-
-def mae_vit_huge_patch14_dec512d8b(**kwargs):
-    model = MaskedAutoencoderViT(
-        patch_size=14, embed_dim=1280, depth=32, num_heads=16,
-        decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-def mae_vit_tinytiny_patch16_dec192d4b(**kwargs):
-    model = MaskedAutoencoderViT(
+def adamae_vit_tinytiny_patch16_dec192d4b(**kwargs):
+    model = AdaMaskedAutoencoderViT(
         patch_size=16, embed_dim=192, depth=6, num_heads=3,
         decoder_embed_dim=192, decoder_depth=4, decoder_num_heads=3,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
-
-# set recommended archs
-mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
-mae_vit_large_patch16 = mae_vit_large_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
-mae_vit_huge_patch14 = mae_vit_huge_patch14_dec512d8b  # decoder: 512 dim, 8 blocks
-mae_vit_ours = mae_vit_tinytiny_patch16_dec192d4b
+adamae_vit_ours = adamae_vit_tinytiny_patch16_dec192d4b

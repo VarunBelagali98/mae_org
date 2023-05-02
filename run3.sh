@@ -1,15 +1,13 @@
-python main_finetune.py \
-    --batch_size 32 \
-    --world_size 1 \
-    --accum_iter 16 \
-    --model vit_base_patch16 \
-    --finetune ../save/random_mae/checkpoint-399.pth \
-    --epochs 100 \
-    --blr 5e-4 --layer_decay 0.65 \
-    --weight_decay 0.05 --drop_path 0.1 --reprob 0.25 --mixup 0.8 --cutmix 1.0 \
-    --dist_eval \
-    --output_dir ../save/debug \
-    --log_dir ../save/debug \
-    --data_path /home/xiangli/imagenet \
+CUDA_VISIBLE_DEVICES=1 python main_finetune.py \
+    --accum_iter 1 \
+    --batch_size 512 \
+    --model vit_tiny_ours \
+    --epochs 50 \
+    --blr 1e-3 --layer_decay 0.75 \
+    --finetune /nfs/bigdisk/varun/save/amt/p2/checkpoint-299.pth \
+    --weight_decay 0.05 --drop_path 0.1 --mixup 0.8 --cutmix 1.0 --reprob 0 \
     --dist_url tcp://localhost:10006 \
-    2>&1 | tee ../save/logs/debug.txt
+    --data_path /data/add_disk0/varun/imagenet100/ \
+    --output_dir /nfs/bigdisk/varun/save/amt/p2_ft/ \
+    --log_dir /nfs/bigdisk/varun/save/amt/p2_ft/ \
+    --nb_classes 100

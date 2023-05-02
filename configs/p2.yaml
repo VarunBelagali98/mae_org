@@ -1,0 +1,19 @@
+backbone_pretrain: /nfs/bigdisk/varun/save/p2/mae_back_ep500_b512/ckpts/checkpoint_0499.pth.tar
+
+#policy
+policy_network_dim: 8
+policy_arch: Policy
+
+# mae model
+patchembed: 'PatchEmbed'
+mask_ratio: 0.5149699936273693
+input_size: 224
+patch_size: 16
+in_chans: 3
+encoder_embed_dim: 192
+encoder_depth: 6
+encoder_num_heads: 3
+gpu: 0
+
+pca_param_path: "../tmp/pca"
+policy_network_parameters: [0.8186754640335039, -0.1111882450423517, -0.24959320585824185, -0.7308552334287792, -0.7613870974526105, 0.015939363899882597, 0.3294821554400904, 0.2057130731758905]

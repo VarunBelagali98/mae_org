@@ -30,12 +30,12 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_mae
+import models_mae_v2
 
 from engine_pretrain_wp import train_one_epoch
 
 from policy_models import MAE_Policy, get_policy_conf, load_policy_model
-
+import wandb
 
 def get_args_parser():
 	parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
@@ -109,6 +109,11 @@ def get_args_parser():
 	parser.add_argument('--policy_config', default="", type=str, 
 						help = "path to config file of policy network")
 
+	parser.add_argument('--proj_name', default='mae_org_vis',
+						help='proj_name')
+	parser.add_argument('--run_name', default='tmp',
+						help='mae_org_vis')
+
 	return parser
 
 
@@ -119,6 +124,13 @@ def main(rank, args):
 	print("mode", args.mode)
 	print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
 	print("{}".format(args).replace(', ', ',\n'))
+
+	run = wandb.init(project=f"{args.proj_name}", 
+						name=args.run_name, 
+						config=vars(args),
+						id=wandb.util.generate_id(),
+						resume='allow',
+						dir=args.output_dir)
 
 	device = torch.device(args.device)
 
@@ -164,7 +176,7 @@ def main(rank, args):
 	)
 	
 	# define the model
-	model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, mode=args.mode)
+	model = models_mae_v2.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, mode=args.mode)
 
 	model.to(device)
 
@@ -235,6 +247,9 @@ def main(rank, args):
 	total_time = time.time() - start_time
 	total_time_str = str(datetime.timedelta(seconds=int(total_time)))
 	print('Training time {}'.format(total_time_str))
+
+	#wandb
+	run.finish()
 
 if __name__ == '__main__':
 	args = get_args_parser()
